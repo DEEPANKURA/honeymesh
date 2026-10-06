@@ -7,7 +7,7 @@ import logging
 import socket
 import threading
 import time
-from collections.abc import Coroutine
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
 from typing import Any
 from uuid import uuid4
@@ -16,6 +16,7 @@ import paramiko
 
 from app.config import SSHSensorConfig
 from app.deception.credentials import SyntheticCredentialStore
+from app.deception.state import DeceptionState
 from app.sensors.base import EmitFn, SensorBase
 
 logger = logging.getLogger(__name__)
@@ -23,6 +24,15 @@ logger = logging.getLogger(__name__)
 PROMPT = "svc_backup@honeyssh:~$ "
 FAKE_UNAME = "Linux honeyssh 5.15.0-91-generic #101-Ubuntu SMP x86_64 GNU/Linux"
 FAKE_LS = "backup-manifest.txt  deploy.sh  logs/  .ssh/  service-status.txt  tmp/"
+
+# Files that only exist once the deception engine escalates. Maps file ->
+# (minimum deception level, event severity when read).
+LEVEL_GATED_FILES: dict[str, tuple[int, str]] = {
+    "credentials.env": (2, "medium"),
+    "finance-archive.csv": (3, "medium"),
+    "hr-export.csv": (3, "medium"),
+    "persistence-drop.sh": (5, "high"),
+}
 
 PERSISTENCE_MARKERS = (
     "crontab",
@@ -53,6 +63,7 @@ class _Session:
     client_ip: str
     started: float = field(default_factory=time.monotonic)
     commands: int = 0
+    history: list[str] = field(default_factory=list)
 
 
 class _ParamikoServer(paramiko.ServerInterface):
@@ -103,11 +114,17 @@ class HoneySSHSensor(SensorBase):
     name = "honeyssh"
 
     def __init__(
-        self, config: SSHSensorConfig, credentials: SyntheticCredentialStore, emit: EmitFn
+        self,
+        config: SSHSensorConfig,
+        credentials: SyntheticCredentialStore,
+        emit: EmitFn,
+        *,
+        state_provider: Callable[[], DeceptionState] | None = None,
     ) -> None:
         super().__init__(emit)
         self.config = config
         self.credentials = credentials
+        self._state_provider = state_provider
         self._sock: socket.socket | None = None
         self._thread: threading.Thread | None = None
         self._running = False
@@ -145,14 +162,36 @@ class HoneySSHSensor(SensorBase):
 
     # -- emit helpers ------------------------------------------------------
     def _schedule(self, coroutine: Coroutine[Any, Any, Any]) -> None:
-        if self._loop is None:
+        loop = self._loop
+        if loop is None or loop.is_closed():
             coroutine.close()
             return
-        future = asyncio.run_coroutine_threadsafe(coroutine, self._loop)
+        try:
+            future = asyncio.run_coroutine_threadsafe(coroutine, loop)
+        except RuntimeError:
+            coroutine.close()
+            return
         future.add_done_callback(_log_future_exception)
 
     def _emit_nowait(self, **kwargs: Any) -> None:
         self._schedule(self.emit_event(**kwargs))
+
+    # -- deception state ----------------------------------------------------
+    def _state(self) -> DeceptionState | None:
+        if self._state_provider is None:
+            return None
+        try:
+            return self._state_provider()
+        except Exception:
+            return None
+
+    def _level(self) -> int:
+        state = self._state()
+        return state.level if state is not None else 1
+
+    def _telemetry_high(self) -> bool:
+        state = self._state()
+        return state is not None and state.telemetry_level in {"high", "maximum"}
 
     def record_auth(self, session: _Session, username: str, password: str) -> None:
         accepted = self.credentials.accept(username, password)
@@ -192,13 +231,22 @@ class HoneySSHSensor(SensorBase):
         self, session: _Session, command: str, respond_to: paramiko.Channel | None = None
     ) -> None:
         session.commands += 1
+        session.history.append(command[:500])
+        del session.history[:-500]
         lowered = command.lower()
+        metadata: dict[str, Any] = {
+            "command": command[:500],
+            "command_index": session.commands,
+        }
+        if self._telemetry_high():
+            metadata["telemetry"] = "high"
+            metadata["session_history"] = list(session.history)
         self._emit_nowait(
             event_type="session_command",
             source_ip=session.client_ip,
             session_id=session.session_id,
             service="ssh",
-            metadata={"command": command[:500], "command_index": session.commands},
+            metadata=metadata,
         )
         if any(marker in lowered for marker in PERSISTENCE_MARKERS):
             self._emit_nowait(
@@ -226,23 +274,51 @@ class HoneySSHSensor(SensorBase):
                 metadata={"command": command[:500], "target_host": "honeyssh"},
             )
 
-        output = self._fake_response(command)
+        output = self._fake_response(session, command)
         if respond_to is not None:
             try:
                 respond_to.sendall(output.encode() + b"\r\n")
                 respond_to.send_exit_status(0)
+                respond_to.shutdown_write()
             except Exception:
                 logger.debug("failed to respond to exec channel", exc_info=True)
 
-    @staticmethod
-    def _fake_response(command: str) -> str:
+    def _fake_response(self, session: _Session, command: str) -> str:
         lowered = command.lower()
+        level = self._level()
+        if lowered.startswith("ls"):
+            visible = [
+                name for name, (min_level, _) in LEVEL_GATED_FILES.items() if level >= min_level
+            ]
+            if visible:
+                return FAKE_LS + "  " + "  ".join(visible)
+            return FAKE_LS
+        parts = lowered.split(maxsplit=1)
+        if len(parts) == 2 and parts[0] in {"cat", "head", "more", "less"}:
+            target = command.split(maxsplit=1)[1].strip().lstrip("./")
+            gate = LEVEL_GATED_FILES.get(target)
+            if gate is not None:
+                min_level, severity = gate
+                if level < min_level:
+                    return f"bash: cat: {target}: No such file or directory"
+                self._emit_nowait(
+                    event_type="asset_access",
+                    source_ip=session.client_ip,
+                    session_id=session.session_id,
+                    service="ssh",
+                    severity=severity,
+                    metadata={
+                        "target_host": "honeyssh",
+                        "asset": target,
+                        "deception_level": level,
+                        "command": command[:200],
+                    },
+                )
+                return self._gated_file_body(target)
         if lowered.startswith("whoami"):
             return "svc_backup"
         if lowered.startswith("uname"):
             return FAKE_UNAME
-        if lowered.startswith("ls"):
-            return FAKE_LS
         if lowered.startswith("id"):
             return "uid=1001(svc_backup) gid=1001(svc_backup) groups=1001(svc_backup),27(sudo)"
         if lowered.startswith("pwd"):
@@ -252,6 +328,35 @@ class HoneySSHSensor(SensorBase):
         if lowered.startswith("exit") or lowered.startswith("logout"):
             return "logout"
         return f"bash: {command.split()[0]}: command not found"
+
+    def _gated_file_body(self, name: str) -> str:
+        if name == "credentials.env":
+            creds = dict(self.credentials.credentials)
+            if not creds:
+                creds = self.credentials.seed_credentials()
+            lines = ["# nightly-sync.env - generated by automation (synthetic)"]
+            lines.extend(f"{user}={password}" for user, password in creds.items())
+            lines.append("# SYNTH/LabOnly - all values fabricated for the lab")
+            return "\n".join(lines)
+        if name == "finance-archive.csv":
+            return (
+                "quarter,region,revenue\n"
+                "Q3,APAC,1041200.55\n"
+                "Q3,EMEA,872004.10\n"
+                "# SYNTH/LabOnly - fabricated ledger export"
+            )
+        if name == "hr-export.csv":
+            return (
+                "employee_id,name,role\n"
+                "E-1041,R. Okafor,Contractor\n"
+                "E-1088,M. Lindqvist,Analyst\n"
+                "# SYNTH/LabOnly - fabricated personnel export"
+            )
+        return (
+            "#!/bin/sh\n"
+            "# SYNTH/LabOnly - fabricated persistence drop for the deception lab\n"
+            '(crontab -l; echo "0 3 * * * /home/svc_backup/.update-cache") 2>/dev/null | crontab -\n'
+        )
 
     # -- connection handling ----------------------------------------------
     def _serve(self) -> None:
@@ -304,15 +409,19 @@ class HoneySSHSensor(SensorBase):
         except (TimeoutError, paramiko.SSHException, OSError) as exc:
             logger.debug("ssh connection ended from %s: %s", client_ip, exc)
         finally:
+            session_meta: dict[str, Any] = {
+                "duration_seconds": round(time.monotonic() - session.started, 3),
+                "commands": session.commands,
+            }
+            if self._telemetry_high():
+                session_meta["telemetry"] = "high"
+                session_meta["session_history"] = list(session.history)
             self._emit_nowait(
                 event_type="session_end",
                 source_ip=client_ip,
                 session_id=session_id,
                 service="ssh",
-                metadata={
-                    "duration_seconds": round(time.monotonic() - session.started, 3),
-                    "commands": session.commands,
-                },
+                metadata=session_meta,
             )
             self._sessions.pop(session_id, None)
             if transport is not None:
@@ -328,17 +437,32 @@ class HoneySSHSensor(SensorBase):
         session: _Session,
     ) -> None:
         channel.settimeout(1.0)
+        current: paramiko.Channel | None = channel
         buffer = b""
         deadline = time.monotonic() + 180
-        while transport.is_active() and time.monotonic() < deadline:
+        while self._running and transport.is_active() and time.monotonic() < deadline:
+            if current is None:
+                try:
+                    current = transport.accept(1.0)
+                except Exception:
+                    logger.debug("ssh channel accept failed", exc_info=True)
+                    break
+                if current is None:
+                    continue
+                current.settimeout(1.0)
+                buffer = b""
+                continue
             try:
-                data = channel.recv(4096)
+                data = current.recv(4096)
             except TimeoutError:
                 continue
             except Exception:
-                break
+                logger.debug("ssh channel recv failed", exc_info=True)
+                current = None
+                continue
             if not data:
-                break
+                current = None
+                continue
             buffer += data
             while b"\n" in buffer:
                 line, buffer = buffer.split(b"\n", 1)
@@ -347,6 +471,6 @@ class HoneySSHSensor(SensorBase):
                     continue
                 self.handle_command(session, text)
                 try:
-                    channel.send(self._fake_response(text) + "\r\n" + PROMPT)
+                    current.send(self._fake_response(session, text) + "\r\n" + PROMPT)
                 except Exception:
                     return

@@ -93,7 +93,14 @@ async def create_context(settings: Settings) -> AppContext:
 
     sensors: list[Any] = []
     if settings.sensors.ssh.enabled:
-        sensors.append(HoneySSHSensor(settings.sensors.ssh, credentials, collector.collect))
+        sensors.append(
+            HoneySSHSensor(
+                settings.sensors.ssh,
+                credentials,
+                collector.collect,
+                state_provider=lambda: engine.state,
+            )
+        )
     if settings.sensors.web.enabled:
         sensors.append(
             HoneyWebSensor(

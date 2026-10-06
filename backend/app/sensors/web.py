@@ -95,6 +95,15 @@ class HoneyWebSensor(SensorBase):
         except Exception:
             return set()
 
+    def _telemetry_high(self) -> bool:
+        if self._state_provider is None:
+            return False
+        try:
+            state: DeceptionState = self._state_provider()
+        except Exception:
+            return False
+        return getattr(state, "telemetry_level", "normal") in {"high", "maximum"}
+
     async def start(self) -> None:
         if not self.config.enabled or self._server is not None:
             return
@@ -170,20 +179,32 @@ class HoneyWebSensor(SensorBase):
             event_type = "http_request"
         else:
             event_type = "http_request"
+        telemetry_high = self._telemetry_high()
+        main_meta: dict[str, Any] = {
+            "method": method,
+            "path": path,
+            "status": status,
+            "user_agent": headers.get("user-agent", "")[:200],
+            "query_keys": sorted(parse_qs(query).keys())[:10],
+        }
+        if telemetry_high:
+            main_meta["telemetry"] = "high"
+            main_meta["request_headers"] = {
+                key: value[:200] for key, value in sorted(headers.items())
+            }
+            if body:
+                main_meta["request_body"] = body[:500]
         await self.emit_event(
             event_type,
             client_ip,
             service="honeyweb",
             session_id=session.sid,
-            metadata={
-                "method": method,
-                "path": path,
-                "status": status,
-                "user_agent": headers.get("user-agent", "")[:200],
-                "query_keys": sorted(parse_qs(query).keys())[:10],
-            },
+            metadata=main_meta,
         )
         for event in extra_events:
+            event_meta = dict(event.get("metadata", {}))
+            if telemetry_high:
+                event_meta.setdefault("telemetry", "high")
             await self.emit_event(
                 event["event_type"],
                 client_ip,
@@ -191,7 +212,7 @@ class HoneyWebSensor(SensorBase):
                 session_id=session.sid,
                 severity=event.get("severity"),
                 username=event.get("username"),
-                metadata=event.get("metadata", {}),
+                metadata=event_meta,
             )
 
     def _session_for(self, headers: dict[str, str], client_ip: str) -> _SessionState:
