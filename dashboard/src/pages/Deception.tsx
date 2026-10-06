@@ -10,6 +10,15 @@ import {
 import { usePoll } from "../lib/live";
 import { Empty, ErrorBox, Loading, formatTime } from "../components/ui";
 
+function stateLabel(value: unknown): string {
+  if (value && typeof value === "object") {
+    const snapshot = value as { level?: number; strategy?: string };
+    return `L${snapshot.level ?? "?"}/${snapshot.strategy ?? "-"}`;
+  }
+  if (value === null || value === undefined || value === "") return "-";
+  return String(value);
+}
+
 export function DeceptionPage(): ReactNode {
   const state = usePoll<DeceptionState>(() => api<DeceptionState>("/deception/state"), 5000);
   const decoys = usePoll<{ items: Decoy[]; total: number }>(
@@ -175,7 +184,7 @@ export function DeceptionPage(): ReactNode {
                     <td className="mono">{action.target ?? "-"}</td>
                     <td className="muted">{action.reason}</td>
                     <td className="mono muted">
-                      {action.previous_state} → {action.new_state}
+                      {stateLabel(action.previous_state)} → {stateLabel(action.new_state)}
                     </td>
                   </tr>
                 ))}

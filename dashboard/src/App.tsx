@@ -4,6 +4,7 @@ import { api, isApiError, setToken } from "./lib/api";
 import { LiveProvider, useLiveConnection } from "./lib/live";
 import { useRoute } from "./lib/router";
 import { Layout, LoginPage } from "./components/Layout";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { OverviewPage } from "./pages/Overview";
 import { EventsPage } from "./pages/Events";
 import { AttackersPage } from "./pages/Attackers";
@@ -43,9 +44,12 @@ function Routes(): ReactNode {
 
 function Shell({ username, onSignOut }: { username: string | null; onSignOut: () => void }): ReactNode {
   const { connected } = useLiveConnection();
+  const [path] = useRoute();
   return (
     <Layout connected={connected} username={username} onSignOut={onSignOut}>
-      <Routes />
+      <ErrorBoundary key={path}>
+        <Routes />
+      </ErrorBoundary>
     </Layout>
   );
 }
