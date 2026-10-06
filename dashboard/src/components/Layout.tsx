@@ -16,9 +16,16 @@ interface LayoutProps {
   connected: boolean;
   username: string | null;
   onSignOut: () => void;
+  onSignInClick: () => void;
 }
 
-export function Layout({ children, connected, username, onSignOut }: LayoutProps): ReactNode {
+export function Layout({
+  children,
+  connected,
+  username,
+  onSignOut,
+  onSignInClick,
+}: LayoutProps): ReactNode {
   const [path, navigate] = useRoute();
 
   const isActive = (target: string) =>
@@ -58,7 +65,11 @@ export function Layout({ children, connected, username, onSignOut }: LayoutProps
             <button type="button" className="btn" onClick={onSignOut}>
               sign out ({username})
             </button>
-          ) : null}
+          ) : (
+            <button type="button" className="btn primary" onClick={onSignInClick}>
+              sign in
+            </button>
+          )}
         </div>
       </aside>
       <main className="main">{children}</main>

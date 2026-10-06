@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
-import { api, isApiError, setToken } from "./lib/api";
+import { api, isApiError, setLoginRequester, setToken } from "./lib/api";
 import { LiveProvider, useLiveConnection } from "./lib/live";
 import { useRoute } from "./lib/router";
 import { Layout, LoginPage } from "./components/Layout";
@@ -42,11 +42,24 @@ function Routes(): ReactNode {
   return <OverviewPage />;
 }
 
-function Shell({ username, onSignOut }: { username: string | null; onSignOut: () => void }): ReactNode {
+function Shell({
+  username,
+  onSignOut,
+  onSignInClick,
+}: {
+  username: string | null;
+  onSignOut: () => void;
+  onSignInClick: () => void;
+}): ReactNode {
   const { connected } = useLiveConnection();
   const [path] = useRoute();
   return (
-    <Layout connected={connected} username={username} onSignOut={onSignOut}>
+    <Layout
+      connected={connected}
+      username={username}
+      onSignOut={onSignOut}
+      onSignInClick={onSignInClick}
+    >
       <ErrorBoundary key={path}>
         <Routes />
       </ErrorBoundary>
@@ -57,6 +70,11 @@ function Shell({ username, onSignOut }: { username: string | null; onSignOut: ()
 export function App(): ReactNode {
   const [boot, setBoot] = useState<Boot>("loading");
   const [username, setUsername] = useState<string | null>(null);
+
+  useEffect(() => {
+    setLoginRequester(() => setBoot("login"));
+    return () => setLoginRequester(null);
+  }, []);
 
   useEffect(() => {
     void (async () => {
@@ -99,6 +117,7 @@ export function App(): ReactNode {
     <LiveProvider>
       <Shell
         username={username}
+        onSignInClick={() => setBoot("login")}
         onSignOut={() => {
           void api("/auth/logout", { method: "POST" }).catch(() => undefined);
           setToken("");

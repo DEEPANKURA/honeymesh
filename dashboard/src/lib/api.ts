@@ -172,3 +172,16 @@ export interface LiveMessage {
 export function isApiError(error: unknown): error is ApiError {
   return error instanceof ApiError;
 }
+
+type LoginRequester = () => void;
+
+let loginRequester: LoginRequester | null = null;
+
+/** Registered by the app shell so any 401 can raise the login screen. */
+export function setLoginRequester(requester: LoginRequester | null): void {
+  loginRequester = requester;
+}
+
+export function requestLogin(): void {
+  loginRequester?.();
+}

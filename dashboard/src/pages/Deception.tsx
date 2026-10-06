@@ -2,6 +2,8 @@ import { useState } from "react";
 import type { ReactNode } from "react";
 import {
   api,
+  isApiError,
+  requestLogin,
   type Decoy,
   type DeceptionAction,
   type DeceptionState,
@@ -42,7 +44,12 @@ export function DeceptionPage(): ReactNode {
       decoys.refresh();
       state.refresh();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      if (isApiError(err) && err.status === 401) {
+        setError("admin sign-in required for decoy changes");
+        requestLogin();
+      } else {
+        setError(err instanceof Error ? err.message : String(err));
+      }
     } finally {
       setBusy(null);
     }
