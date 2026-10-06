@@ -1,0 +1,22 @@
+# Overlay applied on top of default.yaml (see HONEYMESH_CONFIG).
+environment:
+  mode: lab
+
+database:
+  url: "sqlite+aiosqlite:///./data/honeymesh_lab.db"
+
+service:
+  host: 127.0.0.1
+  port: 8000
+
+telemetry:
+  level: high
+
+logging:
+  level: INFO
+
+deception:
+  max_level: 5
+  adaptive_mode: true
+  decision_interval_seconds: 1.0
+  cooldown_seconds: 3.0

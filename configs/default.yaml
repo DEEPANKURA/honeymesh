@@ -1,0 +1,142 @@
+environment:
+  mode: lab
+
+service:
+  host: 127.0.0.1
+  port: 8000
+
+database:
+  url: "sqlite+aiosqlite:///./data/honeymesh.db"
+
+ingest:
+  token: ""
+  rate_limit_per_minute: 6000
+
+auth:
+  admin_username: admin
+  admin_password: ""
+  token_ttl_seconds: 43200
+
+detection:
+  window_seconds: 300
+  scan_threshold: 20
+  brute_force_threshold: 10
+  web_probe_threshold: 15
+  discovery_threshold: 8
+  lateral_threshold: 5
+  persistence_threshold: 3
+  min_events_for_classification: 5
+
+risk:
+  weights:
+    recon: 0.18
+    credential: 0.24
+    web: 0.14
+    discovery: 0.16
+    lateral: 0.16
+    persistence: 0.12
+  velocity_weight: 0.15
+  bands:
+    low: 0.25
+    moderate: 0.50
+    high: 0.75
+
+deception:
+  max_level: 5
+  adaptive_mode: true
+  decision_interval_seconds: 2.0
+  cooldown_seconds: 10.0
+
+telemetry:
+  level: normal
+
+logging:
+  level: INFO
+
+sensors:
+  ssh:
+    enabled: true
+    host: 0.0.0.0
+    port: 2222
+    banner: "SSH-2.0-OpenSSH_8.9p1"
+  web:
+    enabled: true
+    host: 0.0.0.0
+    port: 8081
+  network:
+    enabled: true
+    host: 0.0.0.0
+    port: 9000
+
+decoys:
+  finance-srv:
+    type: http
+    port: 8091
+    deception_level: 3
+    auto_activate: false
+  hr-srv:
+    type: http
+    port: 8092
+    deception_level: 3
+    auto_activate: false
+  backup-srv:
+    type: http
+    port: 8093
+    deception_level: 3
+    auto_activate: false
+
+policies:
+  - name: recon
+    description: "Reconnaissance detected - expose additional synthetic surface"
+    conditions:
+      recon_score: ">0.60"
+    actions:
+      - increase_telemetry
+      - activate_backup_srv
+    escalate_to_level: 2
+
+  - name: credential_attack
+    description: "Credential attack detected - bait with synthetic credentials"
+    conditions:
+      credential_score: ">0.70"
+    actions:
+      - deploy_fake_credentials
+      - increase_auth_telemetry
+    escalate_to_level: 2
+
+  - name: web_probing
+    description: "Web probing detected - expand the decoy application surface"
+    conditions:
+      web_score: ">0.65"
+    actions:
+      - activate_admin_portal
+      - increase_web_telemetry
+    escalate_to_level: 2
+
+  - name: discovery
+    description: "Discovery behavior detected - reveal enterprise decoy hosts"
+    conditions:
+      discovery_score: ">0.65"
+    actions:
+      - activate_finance_srv
+      - activate_hr_srv
+      - activate_backup_srv
+    escalate_to_level: 3
+
+  - name: lateral
+    description: "Lateral-movement-like behavior - deepen cross-host correlation"
+    conditions:
+      lateral_score: ">0.60"
+    actions:
+      - increase_cross_host_correlation
+      - activate_finance_srv
+    escalate_to_level: 4
+
+  - name: persistence
+    description: "Persistence-like behavior - maximum controlled deception"
+    conditions:
+      persistence_score: ">0.55"
+    actions:
+      - deploy_persistence_decoy
+      - increase_telemetry
+    escalate_to_level: 5
